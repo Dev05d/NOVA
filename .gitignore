@@ -1,9 +1,0 @@
-server/.venv/
-server/__pycache__/
-/dataset/
-server/config.py
-server/.DS_Store
-.DS_Store
-.vscode
-Devansh/
-yolo_env/
