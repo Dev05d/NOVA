@@ -10,7 +10,7 @@ import urllib.request
 import matplotlib.pyplot as plt
 
 app = FastAPI()
-model = YOLO("yolo26l.pt")
+model = YOLO("/server/yolo26l.pt")
 count = 0
 prv_class_id = -999
 prv_time = datetime(1, 1, 1, 1, 1, 1)
@@ -35,7 +35,6 @@ SCALE_FACTOR = 0.00034610144793987274
 # This is the function to get the object depth
 def get_object_depth(depth_map, box):
     x1, y1, x2, y2 = map(int, box)
-    
     depth_roi = depth_map[y1:y2, x1:x2]
 
     if depth_roi.size == 0:
@@ -50,6 +49,10 @@ def get_object_distance(result, frame):
     #result = model_result[0]
     boxes = result.boxes.xyxy.cpu().numpy()
 
+    #Guard: no boxes detected
+    if len(boxes) == 0:
+        return 0.0
+
     # MiDaS Depth Estimation
     img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     input_batch = transform(img_rgb).to(device)
@@ -61,10 +64,10 @@ def get_object_distance(result, frame):
         prediction = midas(input_batch)
 
         prediction = torch.nn.functional.interpolate(
-            prediction.unsqueeze(1),
-            size=frame.shape[:2],
-            mode="bicubic",
-            align_corners=False
+        prediction.unsqueeze(1),
+        size=frame.shape[:2],
+        mode="bicubic",
+        align_corners=False
         ).squeeze()
 
     depth_map = prediction.cpu().numpy()
@@ -73,13 +76,17 @@ def get_object_distance(result, frame):
     # Now that an inference is made, we can get depth value #
     # ---------------------------- #
 
-    for box in boxes:
-        depth_value = get_object_depth(depth_map, box)
-        if depth_value is None:
-            continue
-        metric_distance = depth_value * SCALE_FACTOR
-    
-    return metric_distance
+    # for box in boxes:
+    # depth_value = get_object_depth(depth_map, box)
+    # if depth_value is None:
+    # continue
+    # metric_distance = depth_value * SCALE_FACTOR
+    # return metric_distance
+
+    depth_value = get_object_depth(depth_map, boxes[0])
+    if depth_value is None:
+        return 0.0
+    return depth_value * SCALE_FACTOR
 
 @app.post("/send")
 async def get_object(file: UploadFile = File(...)):
@@ -87,23 +94,22 @@ async def get_object(file: UploadFile = File(...)):
 
     # 1. Read bytes from the uploaded file
     contents = await file.read()
-    
     # 2. Convert bytes to a numpy array for OpenCV
     nparr = np.frombuffer(contents, np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
     if frame is None:
-        return {"error": "Invalid image format"}
+        return {"objects": []}
 
     results = model(frame, conf=0.20, verbose=False)
     objects = []
-    
+    class_distance = 0.0
     for r in results: 
         for box in r.boxes:
             class_id = int(box.cls[0])
             class_name = r.names[class_id]
             now = datetime.now()
-            differece = now - prv_time     # Get the numerical ID (e.g., 0) 
+            differece = now - prv_time # Get the numerical ID (e.g., 0) 
             if ((class_id != prv_class_id) or ((differece.total_seconds() / 60) > 2)): # Look up the name (e.g., 'person')
                 if ((differece.total_seconds() / 60) > 2):
                     objects = []
@@ -120,9 +126,9 @@ async def get_object(file: UploadFile = File(...)):
     if (count >= 5):
         count = 1
 
-    objects = {"objects": objects}  # Example array of detected objects
+    objects = {"objects": objects} # Example array of detected objects
     return objects
 
 if __name__ == "__main__":
-    # Run the server
+# Run the server
     uvicorn.run(app, host=config.SERVER_IP, port=8000)
