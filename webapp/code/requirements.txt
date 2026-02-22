@@ -1,0 +1,14 @@
+python -m venv venv
+
+Windows (Command Prompt):
+yolo_env\Scripts\activate.bat
+
+Windows (PowerShell):
+PowerShell
+yolo_env\Scripts\Activate.ps1
+
+macOS and Linux:
+Bash
+source yolo_env/bin/activate
+
+pip install opencv-python numpy ultralytics flask flask-socketio torch torchvision torchaudio eventlet pyopenssl
