@@ -1,7 +1,6 @@
 package com.example.impairedapp
 
 import android.Manifest
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -11,21 +10,14 @@ import android.os.Bundle
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.util.Log
-import android.util.Size
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -42,7 +34,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import com.example.impairedapp.ui.theme.ImpairedAppTheme
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -62,52 +53,58 @@ import java.io.File
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import androidx.core.graphics.scale
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
-// --- DATA CLASSES & INTERFACES ---
+// --- DATA CLASSES & INTERFACES (UNCHANGED) ---
 
-// 1. Python Server Data & Interface
-data class ServerDetectionResponse(val objects: List<String>)
+data class ServerDetectionResponse(
+    val objects: List<List<Any>>
+)
 
 interface PythonServerApiService {
     @Multipart
-    @POST("send") // Change this to your server's endpoint path
-    suspend fun detectObjects(@Part image: MultipartBody.Part): Response<ServerDetectionResponse>
+    @POST("send")
+    suspend fun detectObjects(@Part file: MultipartBody.Part): Response<ServerDetectionResponse>
 }
-
 
 class MainActivity : ComponentActivity() {
 
-    // --- CONFIGURATION ---
     private val USE_MOCK_MODE = false
-    // Replace with your actual computer/server IP address (e.g., "http://192.168.1.100:5000/")
+    private val PYTHON_SERVER_URL_MATEO = "http://172.31.81.122:8000/"
     private val PYTHON_SERVER_URL = "http://172.31.177.224:8000/"
 
-    // Native Android TTS for Mock Mode
     private var nativeTts: TextToSpeech? = null
     private lateinit var cameraExecutor: ExecutorService
-
-    // Audio Playback
     private var mediaPlayer: MediaPlayer? = null
+
     private val httpClient = OkHttpClient()
 
-    // Audio Debounce state
     private var lastSpokenTime = 0L
-    private val SPEAK_COOLDOWN_MS = 4000L // Wait 4 seconds before speaking again
+    private val SPEAK_COOLDOWN_MS = 1L
 
-    // Prevent overlapping speech loops
-    @Volatile
-    private var isSpeaking = false
+    @Volatile private var isSpeaking = false
+    @Volatile private var isProcessingFrame = false
 
-    // Prevent network queue buildup if network is slower than 20fps
-    // @Volatile ensures thread safety since multiple background threads touch this now
-    @Volatile
-    private var isProcessingFrame = false
+    // FIX FOR "UNEXPECTED END OF STREAM":
+    // The interceptor forces "Connection: close" safely, avoiding OkHttp connection pool mismatches with Python servers.
+    private val serverHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .addInterceptor { chain ->
+            val request = chain.request().newBuilder()
+                .header("Connection", "close")
+                .build()
+            chain.proceed(request)
+        }
+        .build()
 
     private val pythonServerService: PythonServerApiService by lazy {
         Retrofit.Builder()
             .baseUrl(PYTHON_SERVER_URL)
+            .client(serverHttpClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(PythonServerApiService::class.java)
@@ -115,93 +112,77 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
         cameraExecutor = Executors.newSingleThreadExecutor()
 
         if (USE_MOCK_MODE) {
             nativeTts = TextToSpeech(this) { status ->
-                if (status == TextToSpeech.SUCCESS) {
-                    nativeTts?.language = Locale.US
-                }
+                if (status == TextToSpeech.SUCCESS) nativeTts?.language = Locale.US
             }
-            Log.d("MOCK_MODE", "Running in Mock Mode! Network calls are disabled.")
         }
 
         setContent {
             ImpairedAppTheme {
-                var hasCameraPermission by remember {
-                    mutableStateOf(
-                        ContextCompat.checkSelfPermission(
-                            this@MainActivity,
-                            Manifest.permission.CAMERA
-                        ) == PackageManager.PERMISSION_GRANTED
-                    )
+                AppContent()
+            }
+        }
+    }
+
+    @Composable
+    private fun AppContent() {
+        var hasCameraPermission by remember {
+            mutableStateOf(ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+        }
+        var hasAttemptedRequest by remember { mutableStateOf(false) }
+
+        val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            hasCameraPermission = granted
+        }
+
+        val lifecycleOwner = LocalLifecycleOwner.current
+
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME && !hasAttemptedRequest && !hasCameraPermission) {
+                    hasAttemptedRequest = true
+                    launcher.launch(Manifest.permission.CAMERA)
                 }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
 
-                // Track if we've already tried automatically asking so it doesn't spam the user
-                var hasAttemptedRequest by remember { mutableStateOf(false) }
-
-                val launcher = rememberLauncherForActivityResult(
-                    contract = ActivityResultContracts.RequestPermission(),
-                    onResult = { granted -> hasCameraPermission = granted }
+        Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+            if (hasCameraPermission) {
+                CameraScreen(
+                    modifier = Modifier.padding(innerPadding),
+                    cameraExecutor = cameraExecutor,
+                    isProcessingFrame = { isProcessingFrame },
+                    onImageCaptured = { bitmap -> processImageOnServer(bitmap) }
                 )
+            } else {
+                PermissionScreen(launcher)
+            }
+        }
+    }
 
-                val lifecycleOwner = LocalLifecycleOwner.current
-
-                // Wait until the App is fully open and visible on the screen to automatically ask for permission
-                DisposableEffect(lifecycleOwner) {
-                    val observer = LifecycleEventObserver { _, event ->
-                        if (event == Lifecycle.Event.ON_RESUME && !hasAttemptedRequest && !hasCameraPermission) {
-                            hasAttemptedRequest = true
-                            launcher.launch(Manifest.permission.CAMERA)
-                        }
-                    }
-                    lifecycleOwner.lifecycle.addObserver(observer)
-                    onDispose {
-                        lifecycleOwner.lifecycle.removeObserver(observer)
-                    }
+    @Composable
+    private fun PermissionScreen(launcher: androidx.activity.result.ActivityResultLauncher<String>) {
+        val context = LocalContext.current
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(text = "Camera permission is required to see objects.")
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) {
+                    Text("Request Permission")
                 }
-
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    if (hasCameraPermission) {
-                        CameraScreen(
-                            modifier = Modifier.padding(innerPadding),
-                            cameraExecutor = cameraExecutor, // Pass the background executor to the camera
-                            isProcessingFrame = { isProcessingFrame }, // Pass the boolean state down to prevent memory crashes
-                            onImageCaptured = { bitmap ->
-                                processImageOnServer(bitmap)
-                            }
-                        )
-                    } else {
-                        val context = LocalContext.current
-
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(text = "Camera permission is required to see objects.")
-                                Spacer(modifier = Modifier.height(16.dp))
-
-                                // Standard Android Request fallback
-                                Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) {
-                                    Text("Request Permission Popup")
-                                }
-
-                                Spacer(modifier = Modifier.height(8.dp))
-
-                                // Deep link to the Phone's App Settings if the popup is permanently blocked
-                                Button(onClick = {
-                                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                        data = Uri.fromParts("package", context.packageName, null)
-                                    }
-                                    context.startActivity(intent)
-                                }) {
-                                    Text("Open Phone Settings")
-                                }
-                            }
-                        }
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", context.packageName, null)
                     }
+                    context.startActivity(intent)
+                }) {
+                    Text("Open Settings")
                 }
             }
         }
@@ -209,158 +190,152 @@ class MainActivity : ComponentActivity() {
 
     private fun processImageOnServer(bitmap: Bitmap) {
         if (USE_MOCK_MODE) {
-            handleSpeaking(listOf("mock person", "mock car"))
+            handleSpeaking(listOf(Pair("mock person", 1.5), Pair("mock car", 3.6)))
             return
         }
 
-        // Double check to prevent overlapping network calls
         if (isProcessingFrame) {
-            bitmap.recycle() // Free memory instantly if dropped
+            bitmap.recycle() // Safely drop the frame
             return
         }
+
         isProcessingFrame = true
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                // 1. Scale down the image to save network bandwidth (e.g. 640x480)
-                val scaledBitmap = bitmap.scale(640, 480)
-                bitmap.recycle() // CRITICAL: Free the massive original 12MP bitmap
-
-                // 2. Compress the Bitmap to JPEG bytes
+                // Scale and Compress
+                val scaledBitmap = Bitmap.createScaledBitmap(bitmap, 640, 480, true)
                 val stream = ByteArrayOutputStream()
                 scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 80, stream)
-                scaledBitmap.recycle() // CRITICAL: Free the scaled bitmap
-                val jpegByteArray = stream.toByteArray()
+                val jpegBytes = stream.toByteArray()
 
-                // 3. Prepare the Multipart request
-                val requestBody = jpegByteArray.toRequestBody("image/jpeg".toMediaTypeOrNull())
+                // Cleanup bitmaps immediately to prevent memory leaks
+                scaledBitmap.recycle()
+                bitmap.recycle()
+
+                val requestBody = jpegBytes.toRequestBody("image/jpeg".toMediaTypeOrNull())
                 val multipartBody = MultipartBody.Part.createFormData("file", "image.jpg", requestBody)
 
-                // 4. Send to Python Server
                 val response = pythonServerService.detectObjects(multipartBody)
 
-                if (response.isSuccessful) {
-                    val serverResponse = response.body()
-                    val detectedObjects = serverResponse?.objects ?: emptyList()
+                if (response.isSuccessful && response.body() != null) {
+                    val detectedTuples = response.body()!!.objects.mapNotNull { item ->
+                        if (item.size >= 2) {
+                            val name = item[0] as? String
+                            val distance = (item[1] as? Number)?.toDouble()
+                            if (name != null && distance != null) Pair(name, distance) else null
+                        } else null
+                    }
 
-                    if (detectedObjects.isNotEmpty()) {
-//                        Log.d("ServerAPI", "Detected objects: $detectedObjects")
-                        // UNCOMMENTED: Trigger the speech handler
-                        handleSpeaking(detectedObjects)
-
+                    if (detectedTuples.isNotEmpty()) {
+                        handleSpeaking(detectedTuples)
                     }
                 } else {
                     Log.e("ServerAPI", "Server error: ${response.code()}")
                 }
 
             } catch (e: Exception) {
-                Log.e("ServerAPI", "Network request failed", e)
+                Log.e("ServerAPI", "Network request failed: ${e.message}")
             } finally {
-                // Unlock frame processing for the next available frame
-                isProcessingFrame = false
+                // Added a delay here to throttle how fast we send frames to the server.
+                // Using NonCancellable ensures the flag is ALWAYS reset even if the lifecycle scope cancels during the delay.
+                withContext(kotlinx.coroutines.NonCancellable) {
+                   // 2-second cooldown delay between server requests (adjust this number as needed)
+                    kotlinx.coroutines.delay(2000)
+                    isProcessingFrame = false
+                }
             }
         }
     }
 
-    private fun handleSpeaking(detectedObjects: List<String>) {
-        val currentTime = System.currentTimeMillis()
+    private fun handleSpeaking(detectedObjects: List<Pair<String, Double>>) {
+        // 1. Check if we are currently speaking
+        if (!isSpeaking) {
+            // 2. Lock it IMMEDIATELY on the current thread before launching the coroutine
+            isSpeaking = true
 
-        // Ensure cooldown has passed AND we arent currently in the middle of speaking
-        if (currentTime - lastSpokenTime > SPEAK_COOLDOWN_MS && !isSpeaking) {
-            lastSpokenTime = currentTime
+            val textToSpeak = detectedObjects.distinct().joinToString(". ") { (name, distance) ->
+                val formattedDistance = String.format(Locale.US, "%.1f", distance)
+                "$name at $formattedDistance meters detected"
+            }
 
-            val uniqueObjects = detectedObjects.distinct()
-
-            // Format for accessibility: "person detected. tree detected."
-            // We join them with a period so ElevenLabs naturally pauses between each one,
-            // while still only requiring ONE fast internet request.
-            val textToSpeak = uniqueObjects.joinToString(". ") { "$it detected" }
-
-            // Launch a coroutine to handle the single network request and playback
             lifecycleScope.launch(Dispatchers.IO) {
-                isSpeaking = true // Lock the speech system
-
-                Log.d("SPEECH_TRIGGER", "Speaking batch: $textToSpeak")
-//                speakAndWait(textToSpeak)
-
-                isSpeaking = false // Unlock the speech system once the audio finishes playing
+                try {
+                    Log.d("SPEECH_TRIGGER", "Speaking batch: $textToSpeak")
+                    // UNCOMMENT TO ENABLE AUDIO
+                    speakAndWait(textToSpeak)
+                } finally {
+                    // 3. Always unlock when finished, even if it crashes
+                    isSpeaking = false
+                }
             }
         }
     }
 
-    // Notice 'suspend' keyword: This allows the Coroutine to pause here until finished.
     private suspend fun speakAndWait(text: String) {
         if (USE_MOCK_MODE) {
-            Log.d("ElevenLabsMock", "Terminal Output: Would have spoken -> '$text'")
-            // QUEUE_ADD ensures native TTS doesn't cut itself off
             nativeTts?.speak(text, TextToSpeech.QUEUE_ADD, null, null)
-            delay(1000) // Simulate waiting for native speech
+            kotlinx.coroutines.delay(1)
             return
         }
 
+        val apiKey = "sk_df317a2498125ae096d0b943c48399c0c11b0d5c3ee6e624"
+        val voiceId = "iP95p4xoKVk53GoZ742B"
+        val jsonBody = """{"text": "$text", "model_id": "eleven_multilingual_v2"}"""
+
+        val request = Request.Builder()
+            .url("https://api.elevenlabs.io/v1/text-to-speech/$voiceId")
+            .addHeader("xi-api-key", apiKey)
+            .post(jsonBody.toRequestBody("application/json".toMediaTypeOrNull()))
+            .build()
+
         try {
-            val apiKey = "sk_df317a2498125ae096d0b943c48399c0c11b0d5c3ee6e624"
-            val voiceId = "iP95p4xoKVk53GoZ742B"
-            val url = "https://api.elevenlabs.io/v1/text-to-speech/$voiceId"
-
-            val jsonBody = """{"text": "$text", "model_id": "eleven_multilingual_v2"}"""
-            val requestBody = jsonBody.toRequestBody("application/json".toMediaTypeOrNull())
-
-            val request = Request.Builder()
-                .url(url)
-                .addHeader("xi-api-key", apiKey)
-                .addHeader("Content-Type", "application/json")
-                .post(requestBody)
-                .build()
-
-            // Making just ONE network call for the entire sentence is much faster!
+            // Execute the network request. This is where an IOException will be thrown
+            // if there is no internet or the connection times out.
             val response = httpClient.newCall(request).execute()
 
+            // Check if the server responded with a success code (e.g., 200 OK)
             if (response.isSuccessful) {
-                val audioBytes = response.body?.bytes()
-                if (audioBytes != null) {
+                response.body?.bytes()?.let { audioBytes ->
                     val outputFile = File(cacheDir, "output.mp3")
                     outputFile.writeBytes(audioBytes)
-                    Log.d("ElevenLabs", "Audio saved as output.mp3")
 
-                    // Switch to Main Thread to play the MP3, and WAIT for it to finish
-                    withContext(Dispatchers.Main) {
-                        playMp3AndWait(outputFile)
-                    }
+                    // Only attempt to play if we successfully saved the bytes
+                    withContext(Dispatchers.Main) { playMp3AndWait(outputFile) }
                 }
             } else {
-                Log.e("ElevenLabs", "Error: ${response.code} - ${response.message}")
+                // The request reached ElevenLabs, but they returned an error
+                // (e.g., 401 Unauthorized, 429 Rate Limit exceeded)
+                Log.e("ElevenLabs", "API Error: ${response.code} - ${response.message}")
             }
+        } catch (e: java.io.IOException) {
+            // Handle physical network failures here (no Wi-Fi, DNS failure, etc.)
+            Log.e("ElevenLabs", "Network Error: Could not reach ElevenLabs", e)
         } catch (e: Exception) {
-            Log.e("ElevenLabs", "Error calling TTS", e)
+            // A safety net for any other unforeseen errors (e.g., file system issues)
+            Log.e("ElevenLabs", "Unexpected error during TTS generation", e)
         }
     }
 
-    // A suspend function that wraps the MediaPlayer. It resumes the Coroutine only when the track finishes.
-    private suspend fun playMp3AndWait(file: File) = suspendCancellableCoroutine { continuation ->
-        try {
-            mediaPlayer?.release()
-            mediaPlayer = MediaPlayer().apply {
-                setDataSource(file.absolutePath)
-
-                // When audio finishes naturally, resume the Coroutine
-                setOnCompletionListener {
-                    continuation.resume(Unit)
+    private suspend fun playMp3AndWait(file: File) = withContext(Dispatchers.Main) {
+        suspendCancellableCoroutine { continuation ->
+            try {
+                mediaPlayer?.release()
+                mediaPlayer = MediaPlayer().apply {
+                    setDataSource(file.absolutePath)
+                    setOnCompletionListener {
+                        if (continuation.isActive) continuation.resume(Unit)
+                    }
+                    setOnErrorListener { _, _, _ ->
+                        if (continuation.isActive) continuation.resume(Unit)
+                        true
+                    }
+                    prepareAsync()
+                    setOnPreparedListener { start() }
                 }
-
-                // If there's an error, resume anyway so the App doesn't hang forever
-                setOnErrorListener { _, _, _ ->
-                    continuation.resume(Unit)
-                    true
-                }
-
-                prepare()
-                start()
-            }
-        } catch (e: Exception) {
-            Log.e("AudioSystem", "Failed to play MP3", e)
-            if (continuation.isActive) {
-                continuation.resume(Unit)
+            } catch (e: Exception) {
+                Log.e("AudioSystem", "Playback exception", e)
+                if (continuation.isActive) continuation.resume(Unit)
             }
         }
     }
@@ -377,24 +352,17 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun CameraScreen(
     modifier: Modifier = Modifier,
-    cameraExecutor: ExecutorService, // Accept executor as parameter
-    isProcessingFrame: () -> Boolean, // Callback to check network status
+    cameraExecutor: ExecutorService,
+    isProcessingFrame: () -> Boolean,
     onImageCaptured: (Bitmap) -> Unit
 ) {
-    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // This prevents the camera from infinitely restarting itself 20 times a second.
-    var lastAnalyzedTimestamp = remember { 0L }
-    val targetFps = 25
-    val frameThrottleMs = 1000L / targetFps
-
-    // Moved camera initialization into the `factory` so it only runs ONCE.
     AndroidView(
         modifier = modifier.fillMaxSize(),
         factory = { ctx ->
             val previewView = PreviewView(ctx)
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx.applicationContext)
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
 
             cameraProviderFuture.addListener({
                 try {
@@ -403,50 +371,45 @@ fun CameraScreen(
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
 
-                    // CRITICAL HARDWARE FIX: Removed forced Resolution and Format.
-                    // Forcing combinations causes many phones to crash immediately. Let CameraX decide the safest format.
+                    // STRATEGY_KEEP_ONLY_LATEST natively handles frame drops, no need for manual timestamps
                     val imageAnalysis = ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
                         .also {
-                            // Use cameraExecutor background thread instead of MainExecutor!
                             it.setAnalyzer(cameraExecutor) { imageProxy ->
-                                val currentTimestamp = System.currentTimeMillis()
-
-                                // Throttle to ~20 FPS (every 50ms)
-                                if (currentTimestamp - lastAnalyzedTimestamp >= frameThrottleMs) {
-                                    lastAnalyzedTimestamp = currentTimestamp
-
-                                    // CRITICAL OOM FIX: Do NOT create a Bitmap if we are currently uploading to the server!
-                                    if (!isProcessingFrame()) {
-                                        try {
-                                            val bitmap = imageProxy.toBitmap()
-                                            onImageCaptured(bitmap)
-                                        } catch (e: Exception) {
-                                            Log.e("CameraScreen", "Bitmap error", e)
-                                        }
-                                    }
+                                if (!isProcessingFrame()) {
+                                    onImageCaptured(imageProxy.toBitmap())
                                 }
-                                // Always close the imageProxy to free up memory for the next frame
-                                imageProxy.close()
+                                imageProxy.close() // ALWAYS close the proxy immediately
                             }
                         }
-
-                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
                     cameraProvider.unbindAll()
                     cameraProvider.bindToLifecycle(
                         lifecycleOwner,
-                        cameraSelector,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
                         preview,
                         imageAnalysis
                     )
                 } catch (e: Exception) {
                     Log.e("CameraScreen", "Critical Camera failure", e)
                 }
-            }, ContextCompat.getMainExecutor(ctx)) // Leave this as MainExecutor (UI binding needs Main Thread)
+            }, ContextCompat.getMainExecutor(ctx))
 
-            previewView // Return the view
+            previewView
         }
     )
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
