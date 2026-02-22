@@ -1,4 +1,4 @@
-# NOVA - Navigation and Obstacle Visual Assistant
+# NOVA - Navigation and Obstacle Voice Assistant
 
 NOVA is an Android application designed to help visually impaired users navigate their surroundings safely. It uses real-time object detection and depth estimation to identify obstacles and announce them through audio feedback.
 
