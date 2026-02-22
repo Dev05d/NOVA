@@ -9,7 +9,7 @@ Android Camera → JPEG Frame → Python Server (YOLO + MiDaS) → Detected Obje
 ```
 
 1. The app captures frames from the phone's camera and sends them to a Python server
-2. The server runs **YOLOv8** object detection to identify objects in the frame
+2. The server runs **YOLOv26** object detection to identify objects in the frame
 3. **MiDaS** depth estimation calculates the distance to each detected object
 4. Results are sent back to the app and converted to speech (e.g. *"person at 0.2 meters detected"*) using the **ElevenLabs** TTS API
 
@@ -19,7 +19,7 @@ Android Camera → JPEG Frame → Python Server (YOLO + MiDaS) → Detected Obje
 |-----------|-------------|
 | **Android App** | Kotlin, Jetpack Compose, CameraX, Retrofit, OkHttp, Coroutines |
 | **Backend Server** | Python, FastAPI, Uvicorn |
-| **AI Models** | YOLOv8 (ultralytics), Intel MiDaS (depth estimation) |
+| **AI Models** | YOLOv26 (ultralytics), Intel MiDaS (depth estimation) |
 | **Audio** | ElevenLabs TTS API, Android MediaPlayer |
 
 ## Project Structure
