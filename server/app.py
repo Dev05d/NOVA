@@ -9,6 +9,10 @@ import torch
 import urllib.request
 import matplotlib.pyplot as plt
 
+from fastapi.responses import JSONResponse
+
+
+
 app = FastAPI()
 model = YOLO("/server/yolo26l.pt")
 count = 0
@@ -106,6 +110,13 @@ async def get_object(file: UploadFile = File(...)):
         return {"objects": []}
 
     results = model(frame, conf=0.20, verbose=False)
+
+    # --- ADD THIS FOR LIVE VIEW ---
+    annotated_frame = results[0].plot()     # YOLO draws the boxes and labels instantly!
+    cv2.imshow("Server Live View", annotated_frame)
+    cv2.waitKey(1)                          # Critical: Gives the window time to update
+    # ------------------------------
+
     objects = []
     class_distance = 0.0
     
@@ -131,8 +142,13 @@ async def get_object(file: UploadFile = File(...)):
     if (count >= 5):
         count = 1
 
-    objects = {"objects": objects}  # Example array of detected objects
-    return objects
+    objects.append([
+        class_name,
+        float(class_distance)
+    ])
+
+    return JSONResponse(content={"objects": objects})
+
 
 if __name__ == "__main__":
     # Run the server
