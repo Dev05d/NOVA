@@ -1,4 +1,4 @@
-.venv/
-/__pycache__/
-/dataset
-config.py
+server/.venv/
+server/__pycache__/
+/dataset/
+server/config.py
