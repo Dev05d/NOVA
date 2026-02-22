@@ -1,31 +1,42 @@
+import config
+import distanceCalculator
 import cv2
-import torch
 from ultralytics import YOLO
 from datetime import datetime
-from fastapi import FastAPI
-import distanceCalculator
+from fastapi import FastAPI, UploadFile, File
+import uvicorn
+import numpy as np
+import torch
+import urllib.request
+import matplotlib.pyplot as plt
 
-# Load a pretrained YOLO26 nano model
+app = FastAPI()
 model = YOLO("yolo26l.pt")
-
-vid = cv2.VideoCapture(0)
 
 count = 0
 prv_class_id = -999
 prv_time = datetime(1, 1, 1, 1, 1, 1)
 
+@app.post("/send")
+async def get_object(file: UploadFile = File(...)):
+    global count, prv_class_id, prv_time
+    # 1. Read bytes from the uploaded file
+    contents = await file.read()
 
-while True: # Capture frame-by-frame
-    ret, frame = vid.read()
-    if not ret:
-        break
-
-    # Run YOLO inference on the frame
+    # 2. Convert bytes to a numpy array for OpenCV
+    nparr = np.frombuffer(contents, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return {"error": "Invalid image format"}
     results = model(frame, conf=0.20, verbose=False)
 
-    # Display the results
-    annotated_frame = results[0].plot()
-    cv2.imshow("YOLO26 Nano Detection", annotated_frame)
+    # --- ADD THIS FOR LIVE VIEW ---
+    annotated_frame = results[0].plot()     # YOLO draws the boxes and labels instantly!
+    cv2.imshow("Server Live View", annotated_frame)
+    cv2.waitKey(1)                          # Critical: Gives the window time to update
+    # ------------------------------
+
+    objects = []
 
     for r in results: 
         for box in r.boxes:
@@ -44,13 +55,11 @@ while True: # Capture frame-by-frame
             if(count == 0):
                 prv_class_id = class_id
                 print(f"Detected {class_name} at distance {class_distance:.2f} meters")
-
     count += 1
     if (count >= 5):
         count = 1
-
-    # Exit on 'q' key press
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-
+    objects = {"objects": objects}  # Example array of detected objects
+    return objects
+if __name__ == "__main__":
+    # Run the server
+    uvicorn.run(app, host=config.SERVER_IP, port=8000)
